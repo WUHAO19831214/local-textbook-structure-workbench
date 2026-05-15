@@ -1,0 +1,8 @@
+backend/.venv/
+backend/exports/*.csv
+frontend/.npm-cache/
+frontend/dist/
+frontend/node_modules/
+__pycache__/
+*.pyc
+.DS_Store

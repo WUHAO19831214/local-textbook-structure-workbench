@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="360" viewBox="0 0 960 360" role="img" aria-labelledby="title desc">
+  <title id="title">MVP-1 sample image</title>
+  <desc id="desc">A simple diagram showing Markdown and images flowing into the reader.</desc>
+  <rect width="960" height="360" fill="#f1f5f9"/>
+  <rect x="90" y="96" width="220" height="168" rx="8" fill="#ffffff" stroke="#94a3b8" stroke-width="2"/>
+  <rect x="370" y="96" width="220" height="168" rx="8" fill="#ffffff" stroke="#0ea5e9" stroke-width="2"/>
+  <rect x="650" y="96" width="220" height="168" rx="8" fill="#ffffff" stroke="#22c55e" stroke-width="2"/>
+  <text x="200" y="174" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#0f172a">Dataset</text>
+  <text x="480" y="174" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#0f172a">FastAPI</text>
+  <text x="760" y="174" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#0f172a">Reader</text>
+  <path d="M320 180H360" stroke="#475569" stroke-width="4" stroke-linecap="round"/>
+  <path d="M600 180H640" stroke="#475569" stroke-width="4" stroke-linecap="round"/>
+  <path d="M354 168L366 180L354 192" fill="none" stroke="#475569" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M634 168L646 180L634 192" fill="none" stroke="#475569" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
