@@ -4,11 +4,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-python3 -m pip install -r backend/requirements.txt -r desktop/requirements.txt
+python3 -m venv .desktop-venv
+source .desktop-venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r backend/requirements.txt -r desktop/requirements.txt
 npm --prefix frontend install
 npm --prefix frontend run build
 
-python3 -m PyInstaller \
+python -m PyInstaller \
   --noconfirm \
   --windowed \
   --name "Local Textbook Workbench" \

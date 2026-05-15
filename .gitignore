@@ -1,4 +1,5 @@
 backend/.venv/
+.desktop-venv/
 backend/exports/*.csv
 frontend/.npm-cache/
 frontend/dist/
