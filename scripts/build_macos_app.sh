@@ -24,4 +24,17 @@ python -m PyInstaller \
   --add-data "frontend/dist:frontend/dist" \
   desktop_app.py
 
-echo "macOS app built at: $ROOT_DIR/dist/Local Textbook Workbench.app"
+APP_PATH="$ROOT_DIR/dist/Local Textbook Workbench.app"
+
+if command -v xattr >/dev/null 2>&1; then
+  xattr -cr "$APP_PATH"
+  xattr -d com.apple.FinderInfo "$APP_PATH" 2>/dev/null || true
+  xattr -d com.apple.FinderInfo "$APP_PATH/Contents/Frameworks/Python3.framework" 2>/dev/null || true
+  xattr -d -s com.apple.FinderInfo "$APP_PATH/Contents/Resources/Python3.framework" 2>/dev/null || true
+fi
+
+if command -v codesign >/dev/null 2>&1; then
+  codesign --force --deep --sign - "$APP_PATH" || true
+fi
+
+echo "macOS app built at: $APP_PATH"
