@@ -5,7 +5,7 @@ import DOMPurify from 'dompurify'
 import { Transformer } from 'markmap-lib'
 import { Markmap } from 'markmap-view'
 
-const API_BASE_URL = 'http://127.0.0.1:8000'
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
 
 const datasetPath = ref('')
 const loading = ref(false)
@@ -528,9 +528,9 @@ function formatApiError(data) {
 
 function formatConnectionError(error) {
   if (error.name === 'AbortError') {
-    return `请求超时。请确认 FastAPI 后端已在 ${API_BASE_URL} 正常运行。`
+    return `请求超时。请确认${API_BASE_URL || '本地后端服务'}正常运行。`
   }
-  return `${error.message}。请确认 FastAPI 后端已在 http://127.0.0.1:8000 启动。`
+  return `${error.message}。请确认本地后端服务已启动。`
 }
 </script>
 

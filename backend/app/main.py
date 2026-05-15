@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import re
 from datetime import datetime
 from hashlib import sha1
@@ -10,6 +11,7 @@ from urllib.parse import quote, urlparse
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -63,6 +65,15 @@ class DatasetLoadResponse(BaseModel):
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/", include_in_schema=False)
+def serve_frontend_index() -> FileResponse:
+    frontend_dist = _frontend_dist_dir()
+    index_path = frontend_dist / "index.html"
+    if not index_path.exists():
+        raise HTTPException(status_code=404, detail="前端构建产物不存在，请先运行 npm run build。")
+    return FileResponse(index_path)
 
 
 @app.post("/api/dataset/load", response_model=DatasetLoadResponse)
@@ -556,3 +567,19 @@ def _split_markdown_url(url: str) -> tuple[str, str]:
             index = url.index(separator)
             return url[:index], url[index:]
     return url, ""
+
+
+def _frontend_dist_dir() -> Path:
+    configured = os.getenv("TEXTBOOK_FRONTEND_DIST")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return (Path(__file__).resolve().parents[2] / "frontend" / "dist").resolve()
+
+
+def _mount_frontend_assets() -> None:
+    assets_dir = _frontend_dist_dir() / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir), check_dir=True), name="frontend_assets")
+
+
+_mount_frontend_assets()

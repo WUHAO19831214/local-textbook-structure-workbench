@@ -28,6 +28,8 @@ backend/
       generic_qa.py
       japanese_vocab.py
   requirements.txt
+desktop/
+  requirements.txt
 frontend/
   index.html
   package.json
@@ -40,9 +42,12 @@ frontend/
     style.css
 examples/
   sample_dataset/
+desktop_app.py
+scripts/
+  build_macos_app.sh
 ```
 
-## Run
+## Run For Development
 
 Backend:
 
@@ -63,6 +68,36 @@ npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
 Open `http://127.0.0.1:5173`.
+
+## Run As A Desktop App
+
+The desktop app keeps the FastAPI backend on the user's own computer, then opens the Vue UI in a native Python webview window. This is the recommended shape for local dataset access.
+
+```bash
+cd frontend
+npm install
+npm run build
+
+cd ..
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt -r ../desktop/requirements.txt
+cd ..
+python desktop_app.py
+```
+
+## Build A macOS App
+
+```bash
+./scripts/build_macos_app.sh
+```
+
+The generated app will be placed at:
+
+```text
+dist/Local Textbook Workbench.app
+```
 
 ## Dataset Shape
 
