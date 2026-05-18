@@ -12,6 +12,8 @@ const loading = ref(false)
 const errorMessage = ref('')
 const markdown = ref('')
 const validation = ref(null)
+const datasetStaticBaseUrl = ref('')
+const doclingPageEntries = ref([])
 const activeTab = ref('meta')
 const readerScroll = ref(null)
 const readerCompact = ref(false)
@@ -59,16 +61,11 @@ const templateOptions = [
 const outlineViewOptions = [
   { value: 'level1', label: '只看一级标题' },
   { value: 'level12', label: '一级 + 二级标题' },
-  { value: 'vocab', label: '只看单词' },
-  { value: 'pattern', label: '只看文型/句型' },
-  { value: 'examples', label: '只看例文' },
-  { value: 'conversation', label: '只看会话' },
-  { value: 'grammar', label: '只看文法' },
-  { value: 'exercise_a', label: '只看练习A' },
-  { value: 'exercise_b', label: '只看练习B' },
-  { value: 'exercise_c', label: '只看练习C' },
-  { value: 'problem', label: '只看问题' },
+  { value: 'level123', label: '一级 + 二级 + 三级标题' },
+  { value: 'all', label: '显示全部标题' },
 ]
+
+const noMatchingHeadingMessage = '当前筛选条件下没有匹配标题，请切换为‘一级 + 二级标题’或‘显示全部标题’。'
 
 marked.setOptions({
   gfm: true,
@@ -91,12 +88,27 @@ const warningSummary = computed(() => {
 const canPreview = computed(() => Boolean(markdown.value && !previewLoading.value))
 const canExport = computed(() => previewCards.value.length > 0 && !exportLoading.value)
 
+const headingFilterOptions = computed(() => [
+  ...outlineViewOptions,
+  ...buildDynamicHeadingFilters(outlineItems.value),
+])
+
 const displayedOutlineItems = computed(() => {
   return filterOutlineItems(outlineViewMode.value)
 })
 
 const displayedExtractRangeItems = computed(() => {
   return filterOutlineItems(extractViewMode.value)
+})
+
+const extractRangeSummary = computed(() => {
+  if (selectedExtractRangeIds.value.length) {
+    return `将从 ${selectedExtractRangeIds.value.length} 个选中范围抽卡`
+  }
+  if (displayedExtractRangeItems.value.length) {
+    return `未手动选择时默认使用当前筛选的 ${displayedExtractRangeItems.value.length} 个章节范围`
+  }
+  return noMatchingHeadingMessage
 })
 
 const currentReaderContext = computed(() => {
@@ -106,15 +118,10 @@ const currentReaderContext = computed(() => {
     outlineItems.value[0]
   if (!current) return null
 
-  const lesson =
-    current.category === 'lesson'
-      ? current.title
-      : current.parent_title || (current.category === 'intro' ? '引言' : current.level === 1 ? current.title : '-')
-
   return {
-    page: current.page ? `P${current.page}` : 'P-',
+    page: current.pageNo || current.page ? `P${current.pageNo || current.page}` : 'P-',
     chapter: current.title,
-    lesson,
+    lesson: current.lesson || current.parent_title || (current.category === 'intro' ? '引言' : current.level === 1 ? current.title : '-'),
   }
 })
 
@@ -140,6 +147,8 @@ async function loadDataset() {
 
     markdown.value = data.markdown
     validation.value = data.validation
+    datasetStaticBaseUrl.value = data.dataset_id ? `${API_BASE_URL}/static/${data.dataset_id}` : data.static_base_url || ''
+    doclingPageEntries.value = []
     activeTab.value = 'meta'
     resetDerivedResults()
     await generateOutline()
@@ -170,7 +179,8 @@ async function generateOutline() {
       outlineError.value = formatApiError(data)
       return
     }
-    outlineItems.value = data.items || []
+    const pageEntries = await loadDoclingPageEntries()
+    outlineItems.value = enrichOutlineItems(data.items || [], pageEntries)
     mindmapHeadingCount.value = data.heading_count || 0
     if (!selectedOutlineId.value && outlineItems.value.length) {
       selectedOutlineId.value = outlineItems.value[0].id
@@ -200,12 +210,26 @@ function filterOutlineItems(mode) {
   if (mode === 'level12') {
     return outlineItems.value.filter((item) => item.level <= 2)
   }
-  return outlineItems.value.filter((item) => item.category === mode)
+  if (mode === 'level123') {
+    return outlineItems.value.filter((item) => item.level <= 3)
+  }
+  if (mode === 'all') {
+    return outlineItems.value
+  }
+  if (isDynamicHeadingFilter(mode)) {
+    const filterText = decodeDynamicHeadingFilter(mode)
+    return outlineItems.value.filter((item) => normalizeHeadingForFilter(item) === filterText)
+  }
+  return outlineItems.value.filter((item) => item.level <= 2)
 }
 
 async function previewExtract() {
   if (!markdown.value) {
     extractError.value = '请先加载数据集。'
+    return
+  }
+  if (!displayedExtractRangeItems.value.length) {
+    extractError.value = noMatchingHeadingMessage
     return
   }
 
@@ -273,6 +297,11 @@ async function generateMindmap() {
 
     const items = displayedOutlineItems.value
     mindmapHeadingCount.value = items.length
+    if (!items.length) {
+      clearMindmap()
+      mindmapMessage.value = noMatchingHeadingMessage
+      return
+    }
     if (items.length < 2) {
       clearMindmap()
       mindmapMessage.value = '当前筛选下标题较少，暂不适合生成脑图。'
@@ -300,12 +329,10 @@ function buildExtractPayload(extra = {}) {
 }
 
 function selectedExtractRanges() {
-  if (!selectedExtractRangeIds.value.length) return null
-  const selectedItems = outlineItems.value.filter((item) => selectedExtractRangeIds.value.includes(item.id))
-  return selectedItems.map((item) => ({
-    start: item.start_line,
-    end: item.end_line,
-  }))
+  const rangeItems = selectedExtractRangeIds.value.length
+    ? outlineItems.value.filter((item) => selectedExtractRangeIds.value.includes(item.id))
+    : displayedExtractRangeItems.value
+  return buildHeadingRanges(rangeItems)
 }
 
 function renderMindmap(outline) {
@@ -367,20 +394,14 @@ function resetDerivedResults() {
 }
 
 function formatOutlineDisplayTitle(item) {
-  if (isCategoryOnlyMode(outlineViewMode.value) && item.parent_title) {
-    if (['vocab', 'pattern', 'examples', 'conversation', 'exercise_a', 'exercise_b', 'exercise_c', 'problem'].includes(item.category)) {
-      return `${item.category_label} · ${item.parent_title}`
-    }
+  if (isDynamicHeadingFilter(outlineViewMode.value) && item.parent_title) {
     return `${item.title} · ${item.parent_title}`
   }
   return item.title
 }
 
 function formatExtractRangeDisplayTitle(item) {
-  if (isCategoryOnlyMode(extractViewMode.value) && item.parent_title) {
-    if (['vocab', 'pattern', 'examples', 'conversation', 'exercise_a', 'exercise_b', 'exercise_c', 'problem'].includes(item.category)) {
-      return `${item.category_label} · ${item.parent_title}`
-    }
+  if (isDynamicHeadingFilter(extractViewMode.value) && item.parent_title) {
     return `${item.title} · ${item.parent_title}`
   }
   return item.title
@@ -393,17 +414,307 @@ function outlineItemClass(item) {
 }
 
 function outlineItemPadding(item) {
-  if (outlineViewMode.value !== 'level1' && outlineViewMode.value !== 'level12') return 8
+  if (isDynamicHeadingFilter(outlineViewMode.value)) return 8
   return 8 + Math.min(item.level - 1, 4) * 14
 }
 
 function extractRangeItemPadding(item) {
-  if (isCategoryOnlyMode(extractViewMode.value)) return 8
+  if (isDynamicHeadingFilter(extractViewMode.value)) return 8
   return 8 + Math.min(item.level - 1, 4) * 14
 }
 
-function isCategoryOnlyMode(mode) {
-  return mode !== 'level1' && mode !== 'level12'
+function isDynamicHeadingFilter(mode) {
+  return typeof mode === 'string' && mode.startsWith('heading:')
+}
+
+function decodeDynamicHeadingFilter(mode) {
+  if (!isDynamicHeadingFilter(mode)) return ''
+  try {
+    return decodeURIComponent(mode.slice('heading:'.length))
+  } catch {
+    return ''
+  }
+}
+
+function buildDynamicHeadingFilters(headings) {
+  const stats = new Map()
+  for (const heading of headings) {
+    if (!heading || heading.level < 2 || heading.level > 3) continue
+    if (heading.headingKind !== 'section') continue
+    const text = normalizeHeadingForFilter(heading)
+    if (!isUsableDynamicHeadingText(text)) continue
+
+    const current = stats.get(text) || {
+      text,
+      label: text,
+      count: 0,
+      firstIndex: heading.markdown_index ?? Number.MAX_SAFE_INTEGER,
+    }
+    current.count += 1
+    current.firstIndex = Math.min(current.firstIndex, heading.markdown_index ?? Number.MAX_SAFE_INTEGER)
+    if (Array.from(text).length < Array.from(current.label).length) {
+      current.label = text
+    }
+    stats.set(text, current)
+  }
+
+  return Array.from(stats.values())
+    .filter((item) => item.count >= 2)
+    .sort((a, b) => {
+      if (b.count !== a.count) return b.count - a.count
+      if (a.firstIndex !== b.firstIndex) return a.firstIndex - b.firstIndex
+      return a.label.localeCompare(b.label, 'zh-Hans')
+    })
+    .slice(0, 20)
+    .map((item) => ({
+      value: `heading:${encodeURIComponent(item.text)}`,
+      label: `只看：${item.label}`,
+    }))
+}
+
+function normalizeHeadingForFilter(heading) {
+  return heading?.normalizedTitle || normalizeOcrHeadingTitle(heading?.title || heading?.rawTitle || '')
+}
+
+function normalizeHeadingFilterText(title) {
+  return String(title || '')
+    .replace(/^#{1,6}\s*/, '')
+    .replace(/\s+#+\s*$/, '')
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .normalize('NFKC')
+    .replace(/[\s\u3000]+/g, ' ')
+    .trim()
+    .replace(
+      /^(?:[\-*_]+\s*)?(?:(?:\(?\d{1,3}\)?|[IVXLCDM]+)[.．、・:：)\-\s]+|[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳][\s.．、:：-]*)/i,
+      '',
+    )
+    .replace(/[\s\u3000]+/g, ' ')
+    .trim()
+}
+
+function normalizeOcrHeadingTitle(rawTitle) {
+  const title = normalizeHeadingFilterText(rawTitle)
+  if (!title) return ''
+
+  const lessonTitle = normalizeLessonTitle(title)
+  if (lessonTitle) return lessonTitle
+
+  const compact = title.replace(/[\s:：.．、・\-_/\\()（）［\]\[\]【】]+/g, '')
+  if (/^(?:单词|単词|单河|単河|单司|単司|单伺|単伺|单洞|単洞|单過|単過|箪語|単語|单語|語彙|词汇|ことば|単)$/.test(compact)) {
+    return '单词'
+  }
+  if (/^(?:会话|会話|会活|会舌)$/.test(compact)) {
+    return '会话'
+  }
+  if (/^(?:句型|句形|旬型|文型|安型)$/.test(compact)) {
+    return '句型'
+  }
+  if (/^(?:例句|例文|例包|例匂|例妥|例安)$/.test(compact)) {
+    return '例句'
+  }
+  if (/^(?:语法|語法|浯法|文法)$/.test(compact)) {
+    return '语法'
+  }
+  if (/^(?:练习|練習|繇习|练刃|繇刃)$/.test(compact) || /^[ぁ-んァ-ンー]+練習[ABC]?$/.test(compact)) {
+    return '练习'
+  }
+  if (/^参考.*(?:信息|息)$/.test(compact)) {
+    return '参考与信息'
+  }
+
+  return title
+}
+
+function normalizeLessonTitle(title) {
+  const match = normalizeHeadingFilterText(title).match(/(?:^|\s)第\s*([0-9一二三四五六七八九十百千]+)\s*(?:课|課|章|节|節|深|果|裸)(?:文)?$/i)
+  if (!match) return ''
+  return `第${match[1]}课`
+}
+
+function detectHeadingKind(heading) {
+  const normalizedTitle = normalizeHeadingForFilter(heading)
+  if (normalizeLessonTitle(normalizedTitle)) {
+    return { kind: 'lesson', category: 'lesson', label: '课' }
+  }
+  if (['单词', '句型', '例句', '会话', '语法', '练习', '参考与信息'].includes(normalizedTitle)) {
+    return { kind: 'section', category: normalizedTitle, label: normalizedTitle }
+  }
+  return { kind: 'other', category: heading?.category || 'other', label: heading?.category_label || '其他' }
+}
+
+function isUsableDynamicHeadingText(text) {
+  if (!text || Array.from(text).length > 20) return false
+  if (/^\d+$/.test(text)) return false
+  if (/^(?:p|page|页|第)?\s*\d+\s*(?:页)?$/i.test(text)) return false
+  if (/(?:^|\s)第\s*[\d一二三四五六七八九十百千]+\s*(?:课|課|章|节|節|深|果|裸)(?:文)?$/i.test(text)) return false
+  if (/[?？!！。；;]/.test(text)) return false
+  if (/[:：]$/.test(text)) return false
+  return true
+}
+
+function enrichOutlineItems(items, pageEntries = []) {
+  let pageCursor = 0
+  const enrichedItems = items.map((item, index) => {
+    const rawTitle = item.rawTitle || item.title || ''
+    const normalizedTitle = normalizeOcrHeadingTitle(rawTitle)
+    const detected = detectHeadingKind({ ...item, rawTitle, normalizedTitle })
+    const pageMatch = item.page ? null : findPageMatchForHeading(rawTitle, normalizedTitle, pageEntries, pageCursor)
+    if (pageMatch && pageMatch.entryIndex >= pageCursor) {
+      pageCursor = pageMatch.entryIndex + 1
+    }
+    const pageNo = item.page || pageMatch?.pageNo || null
+    const lineNumber = Number.isInteger(item.start_line) ? item.start_line + 1 : null
+
+    return {
+      ...item,
+      rawTitle,
+      title: normalizedTitle || rawTitle,
+      normalizedTitle: normalizedTitle || rawTitle,
+      headingKind: detected.kind,
+      category: detected.category,
+      category_label: detected.label,
+      page: pageNo,
+      pageNo,
+      lineNumber,
+      outlineIndex: index,
+    }
+  })
+
+  return enrichedItems.map((item, index) => {
+    const lesson = item.headingKind === 'lesson' ? item.title : getCurrentLessonForHeading(enrichedItems, index)
+    return {
+      ...item,
+      lesson,
+      parent_title: item.headingKind === 'lesson' ? null : lesson || item.parent_title,
+    }
+  })
+}
+
+function getCurrentLessonForHeading(headings, index) {
+  for (let currentIndex = index; currentIndex >= 0; currentIndex -= 1) {
+    const item = headings[currentIndex]
+    if (item?.headingKind === 'lesson') return item.title
+  }
+  return ''
+}
+
+async function loadDoclingPageEntries() {
+  if (doclingPageEntries.value.length) return doclingPageEntries.value
+  if (!datasetStaticBaseUrl.value || !validation.value?.json_file) return []
+
+  try {
+    const jsonUrl = `${datasetStaticBaseUrl.value}/${encodeURIComponent(validation.value.json_file)}`
+    const { response, data } = await fetchJson(jsonUrl, {}, 30000)
+    if (!response.ok) return []
+    doclingPageEntries.value = buildDoclingPageEntries(data)
+  } catch {
+    doclingPageEntries.value = []
+  }
+  return doclingPageEntries.value
+}
+
+function buildDoclingPageEntries(data) {
+  if (!Array.isArray(data?.texts)) return []
+  return data.texts
+    .map((entry) => {
+      const rawText = String(entry?.text || entry?.orig || entry?.content || '').trim()
+      const pageNo = entry?.prov?.find?.((prov) => Number.isInteger(prov?.page_no))?.page_no
+      if (!rawText || !Number.isInteger(pageNo)) return null
+      const normalizedTitle = normalizeOcrHeadingTitle(rawText)
+      return {
+        rawText,
+        normalizedTitle,
+        looseRaw: normalizeTitleForLooseMatch(rawText),
+        looseNormalized: normalizeTitleForLooseMatch(normalizedTitle),
+        pageNo,
+      }
+    })
+    .filter(Boolean)
+}
+
+function findPageMatchForHeading(rawTitle, normalizedTitle, pageEntries = [], startIndex = 0) {
+  if (!pageEntries.length) return null
+  const looseRaw = normalizeTitleForLooseMatch(rawTitle)
+  const looseNormalized = normalizeTitleForLooseMatch(normalizedTitle)
+
+  return (
+    findPageEntry(pageEntries, startIndex, (entry) => entry.looseRaw && entry.looseRaw === looseRaw) ||
+    findPageEntry(pageEntries, startIndex, (entry) => entry.looseNormalized && entry.looseNormalized === looseNormalized) ||
+    findPageEntry(pageEntries, startIndex, (entry) => {
+      if (!looseNormalized || !entry.looseNormalized) return false
+      return looseNormalized.length >= 3 && (entry.looseNormalized.includes(looseNormalized) || looseNormalized.includes(entry.looseNormalized))
+    })
+  )
+}
+
+function findPageEntry(entries, startIndex, predicate) {
+  for (let index = Math.max(0, startIndex); index < entries.length; index += 1) {
+    if (predicate(entries[index])) {
+      return { pageNo: entries[index].pageNo, entryIndex: index }
+    }
+  }
+  for (let index = 0; index < Math.max(0, startIndex); index += 1) {
+    if (predicate(entries[index])) {
+      return { pageNo: entries[index].pageNo, entryIndex: index }
+    }
+  }
+  return null
+}
+
+function normalizeTitleForLooseMatch(title) {
+  return normalizeHeadingFilterText(title)
+    .replace(/[\s:：.．、・\-_/\\()（）［\]\[\]【】"'“”‘’]+/g, '')
+    .toLowerCase()
+}
+
+function formatHeadingMetaBrief(item) {
+  const parts = [`P${item.pageNo || item.page || '-'}`]
+  const lesson = item.lesson || (item.headingKind === 'lesson' ? item.title : '')
+  if (lesson) parts.push(lesson)
+  if (item.lineNumber) parts.push(`L${item.lineNumber}`)
+  return parts.join(' · ')
+}
+
+function formatHeadingMetaTitle(item) {
+  return [
+    `原始标题：${item.rawTitle || item.title || '-'}`,
+    `规范标题：${item.normalizedTitle || item.title || '-'}`,
+    `页码：P${item.pageNo || item.page || '-'}`,
+    `课时：${item.lesson || '-'}`,
+    `行号：${item.lineNumber ? `L${item.lineNumber}` : '-'}`,
+  ].join('\n')
+}
+
+function buildHeadingRanges(items) {
+  if (!items.length) return null
+  const sortedItems = [...items]
+    .filter((item) => Number.isInteger(item.start_line))
+    .sort((a, b) => a.start_line - b.start_line)
+  const ranges = []
+  let coveredEnd = -1
+
+  for (const item of sortedItems) {
+    const start = item.start_line
+    const end = item.end_line ?? null
+    const numericEnd = end ?? Number.POSITIVE_INFINITY
+    if (start <= coveredEnd) continue
+    ranges.push({ start, end })
+    coveredEnd = Math.max(coveredEnd, numericEnd)
+  }
+
+  return ranges.length ? ranges : null
+}
+
+function restoreDefaultHeadingFilter(target) {
+  if (target === 'extract') {
+    extractViewMode.value = 'level12'
+    clearExtractRanges()
+    return
+  }
+  outlineViewMode.value = 'level12'
+  mindmapMessage.value = ''
 }
 
 function toggleExtractRange(item) {
@@ -435,8 +746,7 @@ function clearExtractRanges() {
 
 function outlineItemsToMindmapMarkdown(items) {
   if (!items.length) return ''
-  const categoryOnly = outlineViewMode.value !== 'level1' && outlineViewMode.value !== 'level12'
-  if (categoryOnly) {
+  if (isDynamicHeadingFilter(outlineViewMode.value)) {
     const lines = []
     let currentParent = ''
     for (const item of items) {
@@ -669,7 +979,7 @@ function formatConnectionError(error) {
                     v-model="outlineViewMode"
                     class="h-9 rounded-md border border-slate-300 bg-white px-2 text-sm font-normal text-slate-800 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
                   >
-                    <option v-for="option in outlineViewOptions" :key="option.value" :value="option.value">
+                    <option v-for="option in headingFilterOptions" :key="option.value" :value="option.value">
                       {{ option.label }}
                     </option>
                   </select>
@@ -701,8 +1011,11 @@ function formatConnectionError(error) {
                       {{ item.category_label }}{{ item.parent_title ? ` / ${item.parent_title}` : '' }}
                     </span>
                   </span>
-                  <span class="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-500">
-                    {{ item.page ? `P${item.page}` : '-' }}
+                  <span
+                    class="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-500"
+                    :title="formatHeadingMetaTitle(item)"
+                  >
+                    {{ formatHeadingMetaBrief(item) }}
                   </span>
                 </button>
 
@@ -710,7 +1023,13 @@ function formatConnectionError(error) {
                   加载数据集后整理章节标题
                 </div>
                 <div v-else-if="!outlineLoading && displayedOutlineItems.length === 0" class="px-3 py-8 text-center text-sm text-slate-500">
-                  当前筛选下没有标题
+                  <p>{{ noMatchingHeadingMessage }}</p>
+                  <button
+                    class="mt-3 h-8 rounded-md border border-slate-300 bg-white px-2 text-xs font-medium text-slate-700 transition hover:bg-slate-50"
+                    @click="restoreDefaultHeadingFilter('outline')"
+                  >
+                    恢复为一级 + 二级标题
+                  </button>
                 </div>
               </div>
             </section>
@@ -795,7 +1114,7 @@ function formatConnectionError(error) {
                     class="h-9 rounded-md border border-slate-300 bg-white px-2 text-sm font-normal text-slate-800 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
                     @change="clearExtractRanges"
                   >
-                    <option v-for="option in outlineViewOptions" :key="option.value" :value="option.value">
+                    <option v-for="option in headingFilterOptions" :key="option.value" :value="option.value">
                       {{ option.label }}
                     </option>
                   </select>
@@ -847,8 +1166,11 @@ function formatConnectionError(error) {
                       {{ item.category_label }}{{ item.parent_title ? ` / ${item.parent_title}` : '' }}
                     </span>
                   </span>
-                  <span class="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-500">
-                    {{ item.page ? `P${item.page}` : '-' }}
+                  <span
+                    class="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-500"
+                    :title="formatHeadingMetaTitle(item)"
+                  >
+                    {{ formatHeadingMetaBrief(item) }}
                   </span>
                 </button>
 
@@ -856,7 +1178,13 @@ function formatConnectionError(error) {
                   加载数据集后整理章节标题
                 </div>
                 <div v-else-if="!outlineLoading && displayedExtractRangeItems.length === 0" class="px-3 py-8 text-center text-sm text-slate-500">
-                  当前筛选下没有标题
+                  <p>{{ noMatchingHeadingMessage }}</p>
+                  <button
+                    class="mt-3 h-8 rounded-md border border-slate-300 bg-white px-2 text-xs font-medium text-slate-700 transition hover:bg-slate-50"
+                    @click="restoreDefaultHeadingFilter('extract')"
+                  >
+                    恢复为一级 + 二级标题
+                  </button>
                 </div>
               </div>
             </section>
@@ -886,7 +1214,7 @@ function formatConnectionError(error) {
                 </label>
 
                 <div class="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-                  {{ selectedExtractRangeIds.length ? `将从 ${selectedExtractRangeIds.length} 个选中范围抽卡` : '未选择范围时默认从全文抽卡' }}
+                  {{ extractRangeSummary }}
                 </div>
 
                 <div class="flex flex-wrap gap-2">
