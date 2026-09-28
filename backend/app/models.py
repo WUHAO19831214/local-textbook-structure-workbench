@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -42,6 +42,28 @@ class AnkiExportResponse(BaseModel):
     filename: str
     download_url: str
     total: int
+
+
+DocxExportMode = Literal["editable", "facsimile", "hybrid", "layout_editable"]
+
+
+class DocxExportRequest(BaseModel):
+    dataset_path: str = Field(..., min_length=1)
+    mode: DocxExportMode = "editable"
+    pdf_path: Optional[str] = None
+
+
+class DocxExportResponse(BaseModel):
+    ok: bool
+    docx_path: str
+
+
+class OpenPathRequest(BaseModel):
+    path: str = Field(..., min_length=1)
+
+
+class OpenPathResponse(BaseModel):
+    ok: bool
 
 
 class MindmapGenerateRequest(BaseModel):

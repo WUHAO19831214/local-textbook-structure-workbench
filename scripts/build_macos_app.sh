@@ -21,6 +21,8 @@ python -m PyInstaller \
   --collect-submodules httptools \
   --collect-submodules watchfiles \
   --collect-submodules anyio \
+  --collect-submodules fitz \
+  --collect-data docx \
   --add-data "frontend/dist:frontend/dist" \
   desktop_app.py
 

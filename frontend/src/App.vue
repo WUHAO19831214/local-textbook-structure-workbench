@@ -1,6 +1,8 @@
 <script setup>
 import { computed, nextTick, ref } from 'vue'
 import { marked } from 'marked'
+import markedKatex from 'marked-katex-extension'
+import 'katex/dist/katex.min.css'
 import DOMPurify from 'dompurify'
 import { Transformer } from 'markmap-lib'
 import { Markmap } from 'markmap-view'
@@ -24,10 +26,15 @@ const selectedExtractRangeIds = ref([])
 const customRegex = ref('(?P<front>^##\\s+.+?)\\n(?P<back>[\\s\\S]*?)(?=^##\\s+|\\Z)')
 const previewLoading = ref(false)
 const exportLoading = ref(false)
+const docxExportLoading = ref(false)
+const docxOpenLoading = ref(false)
 const extractError = ref('')
+const docxExportError = ref('')
+const docxExportMode = ref('editable')
 const previewCards = ref([])
 const previewTotal = ref(0)
 const exportResult = ref(null)
+const docxExportResult = ref(null)
 
 const mindmapLoading = ref(false)
 const mindmapError = ref('')
@@ -58,6 +65,13 @@ const templateOptions = [
   { value: 'custom_regex', label: '自定义正则模板' },
 ]
 
+const docxExportModeOptions = [
+  { value: 'editable', label: '可编辑文本' },
+  { value: 'facsimile', label: '原版式' },
+  { value: 'hybrid', label: '原版式 + OCR 文本' },
+  { value: 'layout_editable', label: '可编辑版式' },
+]
+
 const outlineViewOptions = [
   { value: 'level1', label: '只看一级标题' },
   { value: 'level12', label: '一级 + 二级标题' },
@@ -71,6 +85,7 @@ marked.setOptions({
   gfm: true,
   breaks: false,
 })
+marked.use(markedKatex({ throwOnError: false, nonStandard: true }))
 
 const renderedMarkdown = computed(() => {
   const html = marked.parse(markdown.value || '')
@@ -87,6 +102,11 @@ const warningSummary = computed(() => {
 
 const canPreview = computed(() => Boolean(markdown.value && !previewLoading.value))
 const canExport = computed(() => previewCards.value.length > 0 && !exportLoading.value)
+const canExportDocx = computed(() => Boolean(validation.value?.dataset_path && !loading.value && !docxExportLoading.value))
+const docxExportDirectory = computed(() => {
+  const docxPath = docxExportResult.value?.docx_path || ''
+  return docxPath ? docxPath.replace(/\/[^/]*$/, '') : ''
+})
 
 const headingFilterOptions = computed(() => [
   ...outlineViewOptions,
@@ -280,6 +300,59 @@ async function exportCsv() {
   }
 }
 
+async function exportDocx() {
+  if (!validation.value?.dataset_path) {
+    docxExportError.value = '请先加载数据集。'
+    return
+  }
+
+  docxExportLoading.value = true
+  docxExportError.value = ''
+  docxExportResult.value = null
+
+  try {
+    const { response, data } = await fetchJson(`${API_BASE_URL}/api/export/docx`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        dataset_path: validation.value.dataset_path,
+        mode: docxExportMode.value,
+      }),
+    }, 120000)
+    if (!response.ok) {
+      docxExportError.value = formatApiError(data)
+      return
+    }
+    docxExportResult.value = data
+  } catch (error) {
+    docxExportError.value = `导出 Word 失败：${formatConnectionError(error)}`
+  } finally {
+    docxExportLoading.value = false
+  }
+}
+
+async function openDocxDirectory() {
+  if (!docxExportDirectory.value) return
+
+  docxOpenLoading.value = true
+  docxExportError.value = ''
+
+  try {
+    const { response, data } = await fetchJson(`${API_BASE_URL}/api/open/path`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: docxExportDirectory.value }),
+    })
+    if (!response.ok) {
+      docxExportError.value = formatApiError(data)
+    }
+  } catch (error) {
+    docxExportError.value = `打开目录失败：${formatConnectionError(error)}`
+  } finally {
+    docxOpenLoading.value = false
+  }
+}
+
 async function generateMindmap() {
   if (!markdown.value) {
     mindmapError.value = '请先加载数据集。'
@@ -380,7 +453,10 @@ function resetDerivedResults() {
   previewCards.value = []
   previewTotal.value = 0
   exportResult.value = null
+  docxExportResult.value = null
+  docxOpenLoading.value = false
   extractError.value = ''
+  docxExportError.value = ''
   mindmapError.value = ''
   mindmapMessage.value = ''
   mindmapHeadingCount.value = 0
@@ -875,10 +951,57 @@ function formatConnectionError(error) {
               警告 {{ validation.warnings.length }}
             </span>
           </div>
+
+          <label class="flex h-10 shrink-0 items-center gap-2 rounded-md border border-slate-300 bg-white px-2 text-sm text-slate-700">
+            <span class="whitespace-nowrap text-xs font-medium text-slate-500">Word 导出模式</span>
+            <select
+              v-model="docxExportMode"
+              class="h-8 rounded border-0 bg-white text-sm outline-none"
+              :disabled="docxExportLoading"
+              @change="docxExportResult = null; docxExportError = ''"
+            >
+              <option v-for="option in docxExportModeOptions" :key="option.value" :value="option.value">
+                {{ option.label }}
+              </option>
+            </select>
+          </label>
+
+          <button
+            class="h-10 shrink-0 rounded-md bg-emerald-600 px-4 text-sm font-medium text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-400"
+            :disabled="!canExportDocx"
+            @click="exportDocx"
+          >
+            {{ docxExportLoading ? '导出中...' : '导出 Word' }}
+          </button>
         </div>
 
         <div v-if="errorMessage" class="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">
           {{ errorMessage }}
+        </div>
+        <div v-if="docxExportError" class="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">
+          {{ docxExportError }}
+        </div>
+        <div
+          v-if="docxExportMode === 'layout_editable'"
+          class="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900"
+        >
+          可编辑版式为实验功能：尝试用 OCR 文本块和图片块重建页面，文字可编辑，图片尽量靠近原位置，但不保证与原 PDF 完全一致。
+        </div>
+        <div
+          v-if="docxExportResult"
+          class="flex flex-col gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900 md:flex-row md:items-center md:justify-between"
+        >
+          <div class="min-w-0">
+            <span class="font-medium">导出成功：</span>
+            <span class="break-all">{{ docxExportResult.docx_path }}</span>
+          </div>
+          <button
+            class="h-8 shrink-0 rounded-md border border-emerald-300 bg-white px-3 text-sm font-medium text-emerald-800 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:text-emerald-400"
+            :disabled="docxOpenLoading"
+            @click="openDocxDirectory"
+          >
+            {{ docxOpenLoading ? '打开中...' : '打开所在目录' }}
+          </button>
         </div>
       </div>
     </header>

@@ -4,6 +4,8 @@ import csv
 import json
 import os
 import re
+import subprocess
+import sys
 from datetime import datetime
 from hashlib import sha1
 from pathlib import Path
@@ -17,15 +19,20 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.dataset_validator import validate_dataset
+from app.docx_exporter import export_dataset_to_docx
 from app.extractors import get_extractor
 from app.extractors.base import ExtractContext
 from app.models import (
     AnkiExportRequest,
     AnkiExportResponse,
+    DocxExportRequest,
+    DocxExportResponse,
     ExtractPreviewRequest,
     ExtractPreviewResponse,
     MindmapGenerateRequest,
     MindmapGenerateResponse,
+    OpenPathRequest,
+    OpenPathResponse,
     OutlineGenerateRequest,
     OutlineGenerateResponse,
     OutlineItem,
@@ -164,6 +171,37 @@ def export_anki_csv(payload: AnkiExportRequest, request: Request) -> AnkiExportR
         download_url=f"{str(request.base_url).rstrip('/')}/downloads/{quote(filename)}",
         total=len(cards),
     )
+
+
+@app.post("/api/export/docx", response_model=DocxExportResponse)
+def export_docx(payload: DocxExportRequest) -> DocxExportResponse:
+    raw_path = Path(payload.dataset_path).expanduser()
+    if not raw_path.is_absolute():
+        raise HTTPException(status_code=400, detail="请提供本地绝对路径。")
+    pdf_path = Path(payload.pdf_path).expanduser() if payload.pdf_path else None
+
+    try:
+        docx_path = export_dataset_to_docx(raw_path.resolve(), mode=payload.mode, pdf_path=pdf_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"导出 Word 失败：{exc}") from exc
+
+    return DocxExportResponse(ok=True, docx_path=str(docx_path))
+
+
+@app.post("/api/open/path", response_model=OpenPathResponse)
+def open_path(payload: OpenPathRequest) -> OpenPathResponse:
+    target_path = Path(payload.path).expanduser().resolve()
+    if not target_path.exists():
+        raise HTTPException(status_code=400, detail="要打开的路径不存在。")
+
+    try:
+        _open_local_path(target_path)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"打开路径失败：{exc}") from exc
+
+    return OpenPathResponse(ok=True)
 
 
 @app.post("/api/mindmap/generate", response_model=MindmapGenerateResponse)
@@ -567,6 +605,16 @@ def _split_markdown_url(url: str) -> tuple[str, str]:
             index = url.index(separator)
             return url[:index], url[index:]
     return url, ""
+
+
+def _open_local_path(path: Path) -> None:
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", str(path)])
+        return
+    if os.name == "nt":
+        os.startfile(str(path))  # type: ignore[attr-defined]
+        return
+    subprocess.Popen(["xdg-open", str(path)])
 
 
 def _frontend_dist_dir() -> Path:

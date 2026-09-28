@@ -58,6 +58,12 @@ body {
   border-radius: 6px;
 }
 
+.markdown-body .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
 .markdown-body code {
   border-radius: 4px;
   background: #eef2f6;
