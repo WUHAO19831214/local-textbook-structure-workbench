@@ -4,6 +4,7 @@ import base64
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import fitz
 from docx import Document
@@ -25,6 +26,28 @@ PNG = base64.b64decode(
 
 
 class DocxImageLayoutTests(unittest.TestCase):
+    def test_unreadable_formula_uses_source_pdf_crop(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source.pdf"
+            pdf = fitz.open()
+            pdf.new_page(width=300, height=400)
+            pdf.save(source)
+            pdf.close()
+            document = Document()
+            with patch("app.docx_exporter._latex_to_omml", return_value=None):
+                _add_layout_text(
+                    document,
+                    {"text": r"\frac{", "label": "formula",
+                     "bbox": {"l": 40, "t": 350, "r": 140, "b": 320,
+                              "coord_origin": "BOTTOMLEFT"}},
+                    300, 400, source_pdf_path=source, page_number=1,
+                )
+            paragraph = document.paragraphs[0]
+            self.assertEqual(paragraph.text, "")
+            image = paragraph._p.xpath(".//wp:inline/wp:docPr")
+            self.assertEqual(len(image), 1)
+            self.assertEqual(image[0].get("descr"), "source-page=1;OCR-formula-fallback")
+
     @unittest.skipUnless(_find_pandoc(), "Pandoc is required for editable Word equations")
     def test_layout_option_keeps_marker_equation_and_page_position(self) -> None:
         document = Document()

@@ -55,7 +55,8 @@ def export_dataset_to_docx(
     if mode == "layout_editable":
         if dataset_dir is None:
             raise ValueError("可编辑版式模式需要提供数据集目录。")
-        return _export_layout_editable_docx(dataset_dir, dataset_dir)
+        source_pdf_path = _resolve_pdf_path(raw_dataset_path, dataset_dir, pdf_path)
+        return _export_layout_editable_docx(dataset_dir, dataset_dir, source_pdf_path)
 
     resolved_pdf_path = _resolve_pdf_path(raw_dataset_path, dataset_dir, pdf_path)
     if resolved_pdf_path is None:
@@ -187,7 +188,9 @@ def _export_facsimile_docx(
     return docx_path
 
 
-def _export_layout_editable_docx(dataset_dir: Path, export_base_dir: Path) -> Path:
+def _export_layout_editable_docx(
+    dataset_dir: Path, export_base_dir: Path, source_pdf_path: Path | None = None,
+) -> Path:
     data = _load_dataset_json(dataset_dir)
     if data is None:
         raise ValueError("未找到可用于可编辑版式导出的 Docling JSON。")
@@ -241,7 +244,8 @@ def _export_layout_editable_docx(dataset_dir: Path, export_base_dir: Path) -> Pa
 
         for element in elements_by_page.get(page_number, []):
             if element["kind"] == "text":
-                _add_layout_text(document, element, page_width, page_height)
+                _add_layout_text(document, element, page_width, page_height,
+                                 source_pdf_path=source_pdf_path, page_number=page_number)
         if not elements_by_page.get(page_number):
             # A terminal blank PDF page still needs a Word paragraph after
             # the page break, otherwise some renderers omit that page.
@@ -376,6 +380,9 @@ def _add_layout_text(
     element: dict,
     page_width: float,
     page_height: float,
+    *,
+    source_pdf_path: Path | None = None,
+    page_number: int | None = None,
 ) -> None:
     text = _clean_inline_markdown(element["text"])
     if not text:
@@ -393,14 +400,19 @@ def _add_layout_text(
     paragraph.paragraph_format.space_after = Pt(0)
     paragraph.paragraph_format.line_spacing = 1.0
     if label != "section_header":
-        if re.search(r"\$[^$]+\$", text):
-            _append_inline_math(paragraph, text)
-        elif label == "formula":
+        has_inline_math = bool(re.search(r"\$[^$]+\$", text))
+        if label == "formula" and (text.startswith("\\") or not has_inline_math):
             math_element = _latex_to_omml(_normalize_latex_formula(text))
             if math_element is not None:
                 paragraph._p.append(math_element)
+            elif source_pdf_path is not None and page_number is not None and _add_formula_crop(
+                paragraph, source_pdf_path, page_number, element["bbox"], page_width, page_height,
+            ):
+                pass
             else:
                 paragraph.add_run(text).font.size = Pt(8.5)
+        elif has_inline_math:
+            _append_inline_math(paragraph, text)
         else:
             run = paragraph.add_run(text)
             run.font.size = Pt(8.5 if label in {"text", "list_item"} else 8)
@@ -422,6 +434,36 @@ def _anchor_text_frame(paragraph, bbox: dict, page_width: float, page_height: fl
     }.items():
         frame.set(qn(f"w:{name}"), value)
     paragraph._p.get_or_add_pPr().append(frame)
+
+
+def _add_formula_crop(
+    paragraph, source_pdf_path: Path, page_number: int, bbox: dict,
+    page_width: float, page_height: float,
+) -> bool:
+    """Use the source pixels when damaged OCR cannot become native Word math."""
+    rect = _picture_rect_points(bbox, page_width, page_height)
+    if rect is None:
+        return False
+    left, top, right, bottom = rect
+    try:
+        import fitz
+
+        with fitz.open(str(source_pdf_path)) as pdf_document:
+            if not 1 <= page_number <= pdf_document.page_count:
+                return False
+            pixmap = pdf_document[page_number - 1].get_pixmap(
+                matrix=fitz.Matrix(3, 3), clip=fitz.Rect(left, top, right, bottom), alpha=False,
+            )
+        with tempfile.TemporaryDirectory() as temporary:
+            image_path = Path(temporary) / "formula.png"
+            pixmap.save(str(image_path))
+            shape = paragraph.add_run().add_picture(
+                str(image_path), width=Pt(right - left), height=Pt(bottom - top),
+            )
+        shape._inline.docPr.set("descr", f"source-page={page_number};OCR-formula-fallback")
+        return True
+    except Exception:
+        return False
 
 
 def _append_inline_math(paragraph, text: str) -> None:

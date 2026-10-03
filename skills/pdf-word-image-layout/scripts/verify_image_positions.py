@@ -12,6 +12,7 @@ from zipfile import ZipFile
 
 EMUS_PER_POINT = 12700
 WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
 
 def dataset_json(directory: Path) -> dict:
@@ -112,7 +113,27 @@ def max_difference(first: tuple[float, ...], second: tuple[float, ...]) -> float
     return max(abs(a - b) for a, b in zip(first, second))
 
 
-def rendered_errors(path: Path, expected: dict, page_count: int, tolerance: float) -> tuple[list[str], float]:
+def formula_fallback_counts(docx_path: Path) -> dict[int, int]:
+    with ZipFile(docx_path) as archive:
+        root = ET.fromstring(archive.read("word/document.xml"))
+    counts: dict[int, int] = {}
+    for image in root.findall(f".//{{{WP}}}inline"):
+        description = image.find(f"{{{WP}}}docPr")
+        value = description.get("descr", "") if description is not None else ""
+        if not value.endswith(";OCR-formula-fallback"):
+            continue
+        try:
+            page = int(value.split(";")[0].split("=")[1])
+        except (IndexError, ValueError):
+            raise ValueError(f"Invalid formula fallback description: {value!r}") from None
+        counts[page] = counts.get(page, 0) + 1
+    return counts
+
+
+def rendered_errors(
+    path: Path, expected: dict, fallback_counts: dict[int, int],
+    page_count: int, tolerance: float,
+) -> tuple[list[str], float]:
     import pymupdf
 
     errors = []
@@ -123,8 +144,9 @@ def rendered_errors(path: Path, expected: dict, page_count: int, tolerance: floa
         for page_number in range(1, min(pdf.page_count, page_count) + 1):
             boxes = [box for (page, _), box in expected.items() if page == page_number]
             actual = [tuple(info["bbox"]) for info in pdf[page_number - 1].get_image_info(xrefs=True)]
-            if len(actual) != len(boxes):
-                errors.append(f"Page {page_number}: expected {len(boxes)} images, rendered {len(actual)}")
+            expected_total = len(boxes) + fallback_counts.get(page_number, 0)
+            if len(actual) != expected_total:
+                errors.append(f"Page {page_number}: expected {expected_total} images, rendered {len(actual)}")
                 continue
             for box in boxes:
                 match = min(actual, key=lambda candidate: sum(abs(a - b) for a, b in zip(box, candidate)))
@@ -160,7 +182,8 @@ def main() -> int:
     rendered_maximum = None
     if args.rendered_pdf:
         rendered_problems, rendered_maximum = rendered_errors(
-            args.rendered_pdf, expected, len(data["pages"]), args.tolerance_pt
+            args.rendered_pdf, expected, formula_fallback_counts(args.docx),
+            len(data["pages"]), args.tolerance_pt
         )
         errors.extend(rendered_problems)
     print(json.dumps({"pictures": len(expected), "max_docx_error_pt": round(maximum, 3),
