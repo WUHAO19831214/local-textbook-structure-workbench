@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from copy import deepcopy
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 from zipfile import ZipFile
@@ -14,7 +15,7 @@ from zipfile import ZipFile
 from docx import Document
 from docx.enum.section import WD_SECTION_START
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.oxml import parse_xml
+from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt
 from lxml import etree
@@ -23,7 +24,7 @@ from app.dataset_validator import validate_dataset
 
 
 DOCX_EXPORT_MODES = {"editable", "facsimile", "hybrid", "layout_editable"}
-EMUS_PER_INCH = 914400
+EMUS_PER_POINT = 12700
 PDF_RENDER_DPI = 180
 OMML_NAMESPACE = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 IMAGE_PATTERN = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
@@ -116,18 +117,6 @@ def _configure_document(document: Document) -> None:
     normal_style.font.size = Pt(11)
 
 
-def _configure_a4_layout(document: Document) -> None:
-    section = document.sections[0]
-    section.start_type = WD_SECTION_START.NEW_PAGE
-    section.page_width = Inches(8.27)
-    section.page_height = Inches(11.69)
-    section.top_margin = Inches(0.5)
-    section.bottom_margin = Inches(0.5)
-    section.left_margin = Inches(0.5)
-    section.right_margin = Inches(0.5)
-    _configure_document(document)
-
-
 def _export_pdf_layout_docx(
     export_base_dir: Path,
     source_pdf_path: Path,
@@ -139,34 +128,59 @@ def _export_pdf_layout_docx(
         import fitz
     except ImportError as exc:
         raise ValueError("缺少 PyMuPDF 依赖，无法渲染 PDF 页面。") from exc
+    return _export_facsimile_docx(
+        export_base_dir, source_pdf_path, mode=mode,
+        page_texts=page_texts, fallback_markdown=fallback_markdown,
+    )
+
+
+def _export_facsimile_docx(
+    export_base_dir: Path,
+    source_pdf_path: Path,
+    *,
+    mode: str = "facsimile",
+    page_texts: dict[int, str] | None = None,
+    fallback_markdown: str = "",
+) -> Path:
+    import fitz
 
     document = Document()
-    _configure_a4_layout(document)
-    section = document.sections[0]
-    image_width = section.page_width - section.left_margin - section.right_margin
-    scale = PDF_RENDER_DPI / 72
-
+    _configure_document(document)
     with fitz.open(str(source_pdf_path)) as pdf_document, tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir)
-        for page_index in range(pdf_document.page_count):
-            page = pdf_document.load_page(page_index)
-            pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
-            image_path = temp_path / f"page_{page_index + 1:04d}.png"
-            pixmap.save(str(image_path))
-            _add_pdf_page_image(document, image_path, image_width)
-
-            if mode == "hybrid":
-                page_text = page_texts.get(page_index + 1, "").strip()
-                if page_text:
-                    _add_hybrid_page_text(document, page_index + 1, page_text)
-
-            if page_index < pdf_document.page_count - 1:
+        if pdf_document.page_count == 0:
+            raise ValueError("PDF 没有页面。")
+        section = document.sections[0]
+        for page_index, page in enumerate(pdf_document):
+            width, height = float(page.rect.width), float(page.rect.height)
+            if page_index and (abs(width - section.page_width / EMUS_PER_POINT) > 0.5 or
+                               abs(height - section.page_height / EMUS_PER_POINT) > 0.5):
+                section = document.add_section(WD_SECTION_START.NEW_PAGE)
+            elif page_index:
                 document.add_page_break()
+            section.page_width = Pt(width)
+            section.page_height = Pt(height)
+            section.left_margin = section.right_margin = Pt(0)
+            section.top_margin = section.bottom_margin = Pt(0)
+            section.header_distance = section.footer_distance = Pt(0)
+            image_path = Path(temp_dir) / f"page_{page_index + 1:04d}.png"
+            page.get_pixmap(matrix=fitz.Matrix(PDF_RENDER_DPI / 72, PDF_RENDER_DPI / 72), alpha=False).save(str(image_path))
+            paragraph = document.add_paragraph()
+            paragraph.paragraph_format.space_before = Pt(0)
+            paragraph.paragraph_format.space_after = Pt(0)
+            paragraph.paragraph_format.line_spacing = Pt(1)
+            paragraph.add_run().font.size = Pt(1)
+            shape = paragraph.add_run().add_picture(str(image_path), width=Pt(width), height=Pt(height))
+            _anchor_picture_to_page(shape, 0, 0, behind_text=True)
 
-    if mode == "hybrid" and not page_texts and fallback_markdown.strip():
+    if mode == "hybrid":
         document.add_page_break()
-        document.add_heading("全文 OCR 文本", level=1)
-        _add_ocr_text(document, _strip_markdown_images(fallback_markdown), font_size=9)
+        document.add_heading("OCR 可编辑文本", level=1)
+        if page_texts:
+            for page_number, page_text in sorted(page_texts.items()):
+                if page_text.strip():
+                    _add_hybrid_page_text(document, page_number, page_text)
+        elif fallback_markdown.strip():
+            _add_ocr_text(document, _strip_markdown_images(fallback_markdown), font_size=9)
 
     docx_path = _docx_output_path(export_base_dir, mode)
     document.save(docx_path)
@@ -183,11 +197,15 @@ def _export_layout_editable_docx(dataset_dir: Path, export_base_dir: Path) -> Pa
         raise ValueError("Docling JSON 中未找到页面尺寸信息。")
 
     document = Document()
-    _configure_a4_layout(document)
     section = document.sections[0]
-    available_width_inches = (
-        section.page_width - section.left_margin - section.right_margin
-    ) / EMUS_PER_INCH
+    first_page = pages.get(str(min(_sorted_page_numbers(pages)))) or {}
+    first_size = first_page.get("size") or {}
+    section.page_width = Pt(float(first_size.get("width") or 595.0))
+    section.page_height = Pt(float(first_size.get("height") or 841.0))
+    section.left_margin = section.right_margin = Pt(0)
+    section.top_margin = section.bottom_margin = Pt(0)
+    section.header_distance = section.footer_distance = Pt(0)
+    _configure_document(document)
 
     elements_by_page = _layout_elements_by_page(data, dataset_dir)
     page_numbers = _sorted_page_numbers(pages)
@@ -195,15 +213,41 @@ def _export_layout_editable_docx(dataset_dir: Path, export_base_dir: Path) -> Pa
         page_info = pages.get(str(page_number)) or {}
         page_size = page_info.get("size") if isinstance(page_info, dict) else {}
         page_width = float(page_size.get("width") or 595.0)
+        page_height = float(page_size.get("height") or 841.0)
+
+        if page_index and (abs(page_width - section.page_width / EMUS_PER_POINT) > 0.5 or
+                           abs(page_height - section.page_height / EMUS_PER_POINT) > 0.5):
+            section = document.add_section(WD_SECTION_START.NEW_PAGE)
+            section.page_width = Pt(page_width)
+            section.page_height = Pt(page_height)
+            section.left_margin = section.right_margin = Pt(0)
+            section.top_margin = section.bottom_margin = Pt(0)
+            section.header_distance = section.footer_distance = Pt(0)
+        elif page_index:
+            document.add_page_break()
+
+        # All images on the source page share a dedicated anchor paragraph.
+        # Its position stays on this page even when editable text reflows.
+        picture_elements = [element for element in elements_by_page.get(page_number, [])
+                            if element["kind"] == "picture"]
+        if picture_elements:
+            anchor_paragraph = document.add_paragraph()
+            anchor_paragraph.paragraph_format.space_before = Pt(0)
+            anchor_paragraph.paragraph_format.space_after = Pt(0)
+            anchor_paragraph.paragraph_format.line_spacing = Pt(1)
+            anchor_paragraph.add_run().font.size = Pt(1)
+            for element in picture_elements:
+                _add_layout_picture(anchor_paragraph, element, page_width, page_height)
 
         for element in elements_by_page.get(page_number, []):
             if element["kind"] == "text":
-                _add_layout_text(document, element, page_width, available_width_inches)
-            elif element["kind"] == "picture":
-                _add_layout_picture(document, element, page_width, available_width_inches)
-
-        if page_index < len(page_numbers) - 1:
-            document.add_page_break()
+                _add_layout_text(document, element, page_width, page_width / 72)
+        if not elements_by_page.get(page_number):
+            # A terminal blank PDF page still needs a Word paragraph after
+            # the page break, otherwise some renderers omit that page.
+            paragraph = document.add_paragraph("\u00a0")
+            paragraph.paragraph_format.space_after = Pt(0)
+            paragraph.runs[0].font.size = Pt(1)
 
     docx_path = _docx_output_path(export_base_dir, "layout_editable")
     document.save(docx_path)
@@ -232,8 +276,11 @@ def _layout_elements_by_page(data: dict, dataset_dir: Path) -> dict[int, list[di
     picture_boxes_by_page: dict[int, list[dict]] = {}
     elements_by_page: dict[int, list[dict]] = {}
 
+    referenced_pictures = _referenced_picture_indices(data)
     for index, picture in enumerate(pictures):
         if not isinstance(picture, dict):
+            continue
+        if referenced_pictures is not None and index not in referenced_pictures:
             continue
         page_number, bbox = _entry_page_and_bbox(picture)
         if page_number is None or bbox is None:
@@ -248,6 +295,7 @@ def _layout_elements_by_page(data: dict, dataset_dir: Path) -> dict[int, list[di
                 "bbox": bbox,
                 "image_path": image_path,
                 "index": index,
+                "page": page_number,
             }
         )
 
@@ -279,6 +327,39 @@ def _layout_elements_by_page(data: dict, dataset_dir: Path) -> dict[int, list[di
     for page_number, elements in elements_by_page.items():
         elements.sort(key=_layout_element_sort_key)
     return elements_by_page
+
+
+def _referenced_picture_indices(data: dict) -> set[int] | None:
+    """Skip picture objects removed from the document tree during OCR repairs."""
+    body = data.get("body")
+    if not isinstance(body, dict) or not isinstance(body.get("children"), list):
+        return None
+    found: set[int] = set()
+    visited: set[str] = set()
+
+    def visit(ref: str) -> None:
+        if ref in visited or not ref.startswith("#/"):
+            return
+        visited.add(ref)
+        parts = ref[2:].split("/")
+        if len(parts) != 2:
+            return
+        kind, number = parts
+        try:
+            index = int(number)
+            node = data[kind][index]
+        except (KeyError, IndexError, TypeError, ValueError):
+            return
+        if kind == "pictures":
+            found.add(index)
+        for child in node.get("children", []):
+            if isinstance(child, dict) and isinstance(child.get("$ref"), str):
+                visit(child["$ref"])
+
+    for child in body["children"]:
+        if isinstance(child, dict) and isinstance(child.get("$ref"), str):
+            visit(child["$ref"])
+    return found
 
 
 def _layout_element_sort_key(element: dict) -> tuple:
@@ -334,29 +415,63 @@ def _append_inline_math(paragraph, text: str) -> None:
         paragraph.add_run(text[cursor:]).font.size = Pt(8.5)
 
 
-def _add_layout_picture(
-    document: Document,
-    element: dict,
-    page_width: float,
-    available_width_inches: float,
-) -> None:
+def _add_layout_picture(paragraph, element: dict, page_width: float, page_height: float) -> None:
     image_path = element["image_path"]
-    bbox = element["bbox"]
-    width_inches = _bbox_width_inches(bbox, page_width, available_width_inches)
-    left_inches = _bbox_left_inches(bbox, page_width, available_width_inches)
-    if left_inches + width_inches > available_width_inches:
-        left_inches = max(0.0, available_width_inches - width_inches)
-
-    paragraph = document.add_paragraph()
-    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    paragraph.paragraph_format.space_before = Pt(1)
-    paragraph.paragraph_format.space_after = Pt(2)
-    paragraph.paragraph_format.left_indent = Inches(left_inches)
+    geometry = _picture_rect_points(element["bbox"], page_width, page_height)
+    if geometry is None:
+        return
+    left, top, right, bottom = geometry
     run = paragraph.add_run()
     try:
-        run.add_picture(str(image_path), width=Inches(width_inches))
+        shape = run.add_picture(str(image_path), width=Pt(right - left), height=Pt(bottom - top))
+        shape._inline.docPr.set("descr", f"source-page={element['page']};picture-index={element['index']}")
+        _anchor_picture_to_page(shape, left, top)
     except Exception:
         paragraph.add_run(f"[图片无法插入：{image_path.name}]")
+
+
+def _picture_rect_points(bbox: dict, page_width: float, page_height: float) -> tuple[float, float, float, float] | None:
+    left = max(0.0, float(bbox["l"]))
+    right = min(page_width, float(bbox["r"]))
+    if bbox.get("coord_origin") == "BOTTOMLEFT":
+        top = page_height - float(bbox["t"])
+        bottom = page_height - float(bbox["b"])
+    else:
+        top, bottom = float(bbox["t"]), float(bbox["b"])
+    top = max(0.0, top)
+    bottom = min(page_height, bottom)
+    if right <= left or bottom <= top:
+        return None
+    return left, top, right, bottom
+
+
+def _anchor_picture_to_page(shape, left_points: float, top_points: float, *, behind_text: bool = False) -> None:
+    inline = shape._inline
+    anchor = OxmlElement("wp:anchor")
+    for name, value in {
+        "distT": "0", "distB": "0", "distL": "0", "distR": "0",
+        "simplePos": "0", "relativeHeight": "251658240", "behindDoc": "1" if behind_text else "0",
+        "locked": "0", "layoutInCell": "1", "allowOverlap": "1",
+    }.items():
+        anchor.set(name, value)
+    simple = OxmlElement("wp:simplePos")
+    simple.set("x", "0")
+    simple.set("y", "0")
+    anchor.append(simple)
+    for direction, offset_points in (("H", left_points), ("V", top_points)):
+        position = OxmlElement(f"wp:position{direction}")
+        position.set("relativeFrom", "page")
+        offset = OxmlElement("wp:posOffset")
+        offset.text = str(Pt(offset_points))
+        position.append(offset)
+        anchor.append(position)
+    anchor.append(deepcopy(inline.extent))
+    anchor.append(OxmlElement("wp:wrapNone"))
+    anchor.append(deepcopy(inline.docPr))
+    for frame_properties in inline.xpath("./wp:cNvGraphicFramePr"):
+        anchor.append(deepcopy(frame_properties))
+    anchor.append(deepcopy(inline.graphic))
+    inline.getparent().replace(inline, anchor)
 
 
 def _apply_layout_indent(
@@ -371,12 +486,6 @@ def _apply_layout_indent(
 
 def _bbox_left_inches(bbox: dict, page_width: float, available_width_inches: float) -> float:
     return max(0.0, float(bbox.get("l") or 0.0) / max(page_width, 1.0) * available_width_inches)
-
-
-def _bbox_width_inches(bbox: dict, page_width: float, available_width_inches: float) -> float:
-    bbox_width = max(1.0, float(bbox.get("r") or 0.0) - float(bbox.get("l") or 0.0))
-    width_inches = bbox_width / max(page_width, 1.0) * available_width_inches
-    return max(0.7, min(width_inches, available_width_inches))
 
 
 def _entry_page_and_bbox(entry: dict) -> tuple[int | None, dict | None]:
@@ -440,15 +549,6 @@ def _sorted_page_numbers(pages: dict) -> list[int]:
         except (TypeError, ValueError):
             continue
     return sorted(page_numbers)
-
-
-def _add_pdf_page_image(document: Document, image_path: Path, image_width) -> None:
-    paragraph = document.add_paragraph()
-    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    paragraph.paragraph_format.space_before = Pt(0)
-    paragraph.paragraph_format.space_after = Pt(0)
-    run = paragraph.add_run()
-    run.add_picture(str(image_path), width=image_width)
 
 
 def _add_hybrid_page_text(document: Document, page_number: int, page_text: str) -> None:

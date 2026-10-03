@@ -1,0 +1,4 @@
+interface:
+  display_name: "PDF Word Image Layout"
+  short_description: "Anchor PDF figures at their original Word page coordinates"
+  default_prompt: "Preserve image positions while exporting an OCR PDF dataset to Word, then verify rendered placement."

@@ -69,7 +69,7 @@ const docxExportModeOptions = [
   { value: 'editable', label: '可编辑文本' },
   { value: 'facsimile', label: '原版式' },
   { value: 'hybrid', label: '原版式 + OCR 文本' },
-  { value: 'layout_editable', label: '可编辑版式' },
+  { value: 'layout_editable', label: '图片原位 + 可编辑文字' },
 ]
 
 const outlineViewOptions = [
@@ -985,7 +985,7 @@ function formatConnectionError(error) {
           v-if="docxExportMode === 'layout_editable'"
           class="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900"
         >
-          可编辑版式为实验功能：尝试用 OCR 文本块和图片块重建页面，文字可编辑，图片尽量靠近原位置，但不保证与原 PDF 完全一致。
+          图片按 PDF 原页坐标固定，文字由 OCR 重建并可编辑。字体、公式及换行仍可能与原 PDF 不同；需要整页视觉一致时请选择“原版式”。
         </div>
         <div
           v-if="docxExportResult"
