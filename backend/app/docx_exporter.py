@@ -241,7 +241,7 @@ def _export_layout_editable_docx(dataset_dir: Path, export_base_dir: Path) -> Pa
 
         for element in elements_by_page.get(page_number, []):
             if element["kind"] == "text":
-                _add_layout_text(document, element, page_width, page_width / 72)
+                _add_layout_text(document, element, page_width, page_height)
         if not elements_by_page.get(page_number):
             # A terminal blank PDF page still needs a Word paragraph after
             # the page break, otherwise some renderers omit that page.
@@ -321,6 +321,7 @@ def _layout_elements_by_page(data: dict, dataset_dir: Path) -> dict[int, list[di
                 "bbox": bbox,
                 "text": raw_text,
                 "label": text_entry.get("label") or "text",
+                "marker": text_entry.get("marker") or "",
             }
         )
 
@@ -374,29 +375,53 @@ def _add_layout_text(
     document: Document,
     element: dict,
     page_width: float,
-    available_width_inches: float,
+    page_height: float,
 ) -> None:
     text = _clean_inline_markdown(element["text"])
     if not text:
         return
+    marker = str(element.get("marker") or "").strip()
+    if marker and not text.lstrip().startswith(marker):
+        text = f"{marker} {text}"
     label = element.get("label") or "text"
     if label == "section_header":
         paragraph = document.add_heading(text, level=2)
-    elif label == "formula" or (_looks_like_formula(text) and not re.search(r"[\u3400-\u9fff]", text)):
-        _add_formula(document, text)
-        return
     else:
         paragraph = document.add_paragraph()
-        paragraph.paragraph_format.space_before = Pt(0)
-        paragraph.paragraph_format.space_after = Pt(1)
-        paragraph.paragraph_format.line_spacing = 1.0
+    _anchor_text_frame(paragraph, element["bbox"], page_width, page_height)
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(0)
+    paragraph.paragraph_format.line_spacing = 1.0
+    if label != "section_header":
         if re.search(r"\$[^$]+\$", text):
             _append_inline_math(paragraph, text)
+        elif label == "formula":
+            math_element = _latex_to_omml(_normalize_latex_formula(text))
+            if math_element is not None:
+                paragraph._p.append(math_element)
+            else:
+                paragraph.add_run(text).font.size = Pt(8.5)
         else:
             run = paragraph.add_run(text)
             run.font.size = Pt(8.5 if label in {"text", "list_item"} else 8)
 
-    _apply_layout_indent(paragraph, element["bbox"], page_width, available_width_inches)
+
+def _anchor_text_frame(paragraph, bbox: dict, page_width: float, page_height: float) -> None:
+    """Keep editable OCR text at its source-page coordinates."""
+    rect = _picture_rect_points(bbox, page_width, page_height)
+    if rect is None:
+        return
+    left, top, right, bottom = rect
+    frame = OxmlElement("w:framePr")
+    for name, value in {
+        "hAnchor": "page", "vAnchor": "page", "wrap": "none", "anchorLock": "1",
+        "x": str(round(left * 20)), "y": str(round(top * 20)),
+        "w": str(round(min(page_width - left, max(right - left + 3, (right - left) * 1.06)) * 20)),
+        "h": str(round(max(bottom - top + 3, 12) * 20)),
+        "hRule": "atLeast", "hSpace": "0", "vSpace": "0",
+    }.items():
+        frame.set(qn(f"w:{name}"), value)
+    paragraph._p.get_or_add_pPr().append(frame)
 
 
 def _append_inline_math(paragraph, text: str) -> None:
@@ -472,20 +497,6 @@ def _anchor_picture_to_page(shape, left_points: float, top_points: float, *, beh
         anchor.append(deepcopy(frame_properties))
     anchor.append(deepcopy(inline.graphic))
     inline.getparent().replace(inline, anchor)
-
-
-def _apply_layout_indent(
-    paragraph,
-    bbox: dict,
-    page_width: float,
-    available_width_inches: float,
-) -> None:
-    left_inches = _bbox_left_inches(bbox, page_width, available_width_inches)
-    paragraph.paragraph_format.left_indent = Inches(min(left_inches, max(0.0, available_width_inches - 1.0)))
-
-
-def _bbox_left_inches(bbox: dict, page_width: float, available_width_inches: float) -> float:
-    return max(0.0, float(bbox.get("l") or 0.0) / max(page_width, 1.0) * available_width_inches)
 
 
 def _entry_page_and_bbox(entry: dict) -> tuple[int | None, dict | None]:

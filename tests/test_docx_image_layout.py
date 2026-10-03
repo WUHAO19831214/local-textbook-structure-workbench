@@ -10,8 +10,10 @@ from docx import Document
 from docx.shared import Pt
 
 from app.docx_exporter import (
+    _add_layout_text,
     _add_layout_picture,
     _export_facsimile_docx,
+    _find_pandoc,
     _picture_rect_points,
     _referenced_picture_indices,
 )
@@ -23,6 +25,25 @@ PNG = base64.b64decode(
 
 
 class DocxImageLayoutTests(unittest.TestCase):
+    @unittest.skipUnless(_find_pandoc(), "Pandoc is required for editable Word equations")
+    def test_layout_option_keeps_marker_equation_and_page_position(self) -> None:
+        document = Document()
+        _add_layout_text(
+            document,
+            {"text": r"$ |\Delta E_{p1}| < |\Delta E_{p2}| $", "label": "list_item",
+             "marker": "A.", "bbox": {"l": 57, "t": 314, "r": 147, "b": 302,
+                                      "coord_origin": "BOTTOMLEFT"}},
+            595, 841,
+        )
+        paragraph = document.paragraphs[0]
+        self.assertEqual(paragraph.text, "A. ")
+        self.assertEqual(len(paragraph._p.xpath(".//m:oMath")), 1)
+        self.assertEqual(len(paragraph._p.xpath(".//w:framePr")), 1)
+        frame = paragraph._p.xpath(".//w:framePr")[0]
+        self.assertEqual(frame.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}x"), "1140")
+        self.assertEqual(frame.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}y"), "10540")
+        self.assertNotIn("$$", paragraph.text)
+
     def test_bottom_left_pdf_box_converts_to_page_coordinates(self) -> None:
         bbox = {"l": 100, "t": 740, "r": 160, "b": 690, "coord_origin": "BOTTOMLEFT"}
         self.assertEqual(_picture_rect_points(bbox, 595, 841), (100, 101, 160, 151))
